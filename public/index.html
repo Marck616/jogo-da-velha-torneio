@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Jogo da Velha — Torneio</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- Tela de login -->
+  <section id="login-screen" class="screen">
+    <div class="card">
+      <h1>🎮 Jogo da Velha</h1>
+      <p class="subtitle">Torneio online</p>
+
+      <label class="field">
+        <span>Seu nome</span>
+        <input id="name-input" type="text" maxlength="20" autocomplete="off" placeholder="Ex: João" />
+      </label>
+
+      <span class="field-label">Sua cor</span>
+      <div id="color-picker" class="color-picker"></div>
+
+      <button id="join-btn" class="primary">Entrar no torneio</button>
+      <p id="login-error" class="error-msg"></p>
+    </div>
+  </section>
+
+  <!-- Tela do jogo -->
+  <section id="game-screen" class="screen hidden">
+    <header class="topbar">
+      <div class="me">
+        <span id="me-dot" class="dot"></span>
+        <span id="me-name">—</span>
+        <span class="wins">🏆 <span id="me-wins">0</span></span>
+      </div>
+      <button id="leave-btn" class="ghost" title="Sair">Sair</button>
+    </header>
+
+    <main>
+      <div class="board-wrap">
+        <div id="match-info" class="match-info">Aguardando jogadores…</div>
+        <div id="board" class="board"></div>
+        <div id="turn-info" class="turn-info"></div>
+      </div>
+
+      <aside class="side">
+        <div class="card small">
+          <h2>🏆 Campeão</h2>
+          <div id="champion" class="champion">—</div>
+        </div>
+
+        <div class="card small">
+          <h2>⏳ Fila</h2>
+          <ol id="queue" class="queue"></ol>
+          <p id="queue-empty" class="muted">Ninguém na fila</p>
+        </div>
+      </aside>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+  </section>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
