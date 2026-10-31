@@ -1,6 +1,6 @@
 const { createBoard, checkResult, applyMove, nextTurn } = require('./ticTacToe');
 
-const RECONNECT_GRACE_MS = 60 * 1000;       // 60s para reconectar
+const INACTIVITY_TIMEOUT_MS = 15 * 1000;    // 15s offline → perde a vez
 const END_MATCH_DELAY_MS = 3000;            // pausa para mostrar resultado
 
 const COLORS = [
@@ -9,17 +9,13 @@ const COLORS = [
 ];
 
 class Tournament {
-  /**
-   * @param {() => void} broadcast callback chamado sempre que o estado muda
-   *                              por causa de um timer interno (desconexão etc.)
-   */
   constructor(broadcast = () => {}) {
     this.broadcast = broadcast;
-    this.players = new Map();       // name -> { name, color, wins, socketId, connected, disconnectTimer }
-    this.queue = [];                // [name, ...]  ordem de quem espera jogar
-    this.champion = null;           // name do vencedor atual esperando desafiante
-    this.currentMatch = null;       // { playerX, playerO, board, turn, winner, winLine, finished }
-    this.history = [];              // últimas partidas
+    this.players = new Map();
+    this.queue = [];
+    this.champion = null;
+    this.currentMatch = null;
+    this.history = [];
   }
 
   // ---------- Entrada / saída de jogadores ----------
@@ -53,7 +49,6 @@ class Tournament {
       }
     }
 
-    // Se não está em partida, fila ou como campeão, coloca no torneio
     const inMatch = this.currentMatch &&
       (this.currentMatch.playerX === name || this.currentMatch.playerO === name);
     const inQueue = this.queue.includes(name);
@@ -61,8 +56,10 @@ class Tournament {
 
     if (!inMatch && !inQueue && !isChampion) {
       this.queue.push(name);
-      this._tryStartNextMatch();
     }
+
+    // Sempre tenta iniciar (cobre campeão reconectando com fila esperando)
+    this._tryStartNextMatch();
 
     return { ok: true };
   }
@@ -74,45 +71,74 @@ class Tournament {
     player.connected = false;
     player.socketId = null;
 
-    // Período de graça para reconectar
     player.disconnectTimer = setTimeout(() => {
       this._handleDisconnectTimeout(name);
-    }, RECONNECT_GRACE_MS);
+    }, INACTIVITY_TIMEOUT_MS);
   }
 
   _handleDisconnectTimeout(name) {
     const player = this.players.get(name);
     if (!player || player.connected) return;
 
-    // Se estava em partida
-    if (this.currentMatch) {
-      const isX = this.currentMatch.playerX === name;
-      const isO = this.currentMatch.playerO === name;
-      if (isX || isO) {
-        const oppName = isX ? this.currentMatch.playerO : this.currentMatch.playerX;
-        const opp = this.players.get(oppName);
-        if (opp && opp.connected) {
-          this._finishMatch(oppName);
-          return;
-        }
-        // Ambos desconectados -> cancela a partida
-        this.history.push({
-          ...this.currentMatch,
-          winner: null,
-          cancelled: true,
-        });
-        this.currentMatch = null;
+    // Em partida ainda em andamento → substituição pelo próximo da fila
+    if (this.currentMatch && !this.currentMatch.finished) {
+      const inThisMatch =
+        this.currentMatch.playerX === name || this.currentMatch.playerO === name;
+      if (inThisMatch) {
+        this._handleMatchForfeit(name);
+        return;
       }
     }
 
-    // Se era campeão, perde o posto
     if (this.champion === name) this.champion = null;
 
-    // Sai da fila
     const idx = this.queue.indexOf(name);
     if (idx !== -1) this.queue.splice(idx, 1);
 
     this._tryStartNextMatch();
+    this.broadcast();
+  }
+
+  /**
+   * Jogador em partida ficou offline por mais de INACTIVITY_TIMEOUT_MS.
+   * Ele "perde a vez": o adversário continua e o próximo da fila assume o
+   * lugar de quem caiu (nova partida). Sem próximo, o adversário vira campeão.
+   */
+  _handleMatchForfeit(name) {
+    const match = this.currentMatch;
+    if (!match) return;
+
+    if (this.champion === name) this.champion = null;
+
+    const remainingName =
+      match.playerX === name ? match.playerO : match.playerX;
+    const remaining = this.players.get(remainingName);
+
+    this.history.push({
+      ...match,
+      winner: null,
+      forfeitedBy: name,
+      cancelled: true,
+      finished: true,
+    });
+    if (this.history.length > 20) this.history.shift();
+
+    this.currentMatch = null;
+
+    // Se o outro também caiu, apenas tenta próximo
+    if (!remaining || !remaining.connected) {
+      this._tryStartNextMatch();
+      this.broadcast();
+      return;
+    }
+
+    const nextChallenger = this._takeNextConnectedFromQueue();
+    this.champion = remainingName;
+
+    if (nextChallenger) {
+      this._startMatch(remainingName, nextChallenger);
+    }
+
     this.broadcast();
   }
 
@@ -144,32 +170,27 @@ class Tournament {
     if (result.winner === 'draw') {
       match.winner = 'draw';
       match.finished = true;
-      this.history.push({ ...match });
-      setTimeout(() => this._rematchDraw(match), END_MATCH_DELAY_MS);
+      setTimeout(() => this._handleDraw(match), END_MATCH_DELAY_MS);
       return { ok: true };
     }
 
-    // Alguém venceu
     match.winner = result.winner;
     match.winLine = result.line;
     match.finished = true;
 
-    const winnerName =
-      result.winner === 'X' ? match.playerX : match.playerO;
-
-    setTimeout(() => this._finishMatch(winnerName), END_MATCH_DELAY_MS);
+    const winnerName = result.winner === 'X' ? match.playerX : match.playerO;
+    setTimeout(() => this._finishMatch(match, winnerName), END_MATCH_DELAY_MS);
 
     return { ok: true };
   }
 
-  _finishMatch(winnerName) {
-    const match = this.currentMatch;
-    if (!match) return;
+  _finishMatch(match, winnerName) {
+    // Ignora se a partida já foi substituída/cancelada
+    if (this.currentMatch !== match) return;
 
     const winner = this.players.get(winnerName);
     if (winner) winner.wins++;
 
-    // O perdedor volta para o fim da fila (para poder jogar de novo)
     const loser =
       match.playerX === winnerName ? match.playerO : match.playerX;
 
@@ -179,44 +200,55 @@ class Tournament {
     this.currentMatch = null;
     this.champion = winnerName;
 
-    // Perdedor volta para a fila se ainda estiver por aqui
     if (this.players.has(loser)) this.queue.push(loser);
 
     this._tryStartNextMatch();
     this.broadcast();
   }
 
-  _rematchDraw(match) {
-    // Empatou: mesma dupla, invertendo quem começa
+  /** Empate: os dois voltam para o fim da fila (ninguém mantém o título). */
+  _handleDraw(match) {
+    if (this.currentMatch !== match) return;
+
     this.history.push({ ...match, winner: 'draw' });
-    this.currentMatch = {
-      playerX: match.playerO,
-      playerO: match.playerX,
-      board: createBoard(),
-      turn: 'X',
-      winner: null,
-      winLine: null,
-      finished: false,
-    };
+    if (this.history.length > 20) this.history.shift();
+
+    this.currentMatch = null;
+    this.champion = null;
+
+    for (const name of [match.playerX, match.playerO]) {
+      if (this.players.has(name)) this.queue.push(name);
+    }
+
+    this._tryStartNextMatch();
     this.broadcast();
   }
 
   _tryStartNextMatch() {
     if (this.currentMatch) return;
 
-    // Caso 1: campeão + desafiante na fila
-    if (this.champion && this.queue.length > 0) {
-      const challenger = this.queue.shift();
-      this._startMatch(this.champion, challenger);
+    // Caso 1: campeão conectado + desafiante conectado na fila
+    if (this.champion) {
+      const champ = this.players.get(this.champion);
+      if (champ && champ.connected) {
+        const challenger = this._takeNextConnectedFromQueue();
+        if (challenger) this._startMatch(this.champion, challenger);
+      }
       return;
     }
 
-    // Caso 2: sem campeão, dois na fila
-    if (!this.champion && this.queue.length >= 2) {
-      const p1 = this.queue.shift();
-      const p2 = this.queue.shift();
-      this._startMatch(p1, p2);
+    // Caso 2: sem campeão, dois conectados na fila
+    const idxs = [];
+    for (let i = 0; i < this.queue.length && idxs.length < 2; i++) {
+      const p = this.players.get(this.queue[i]);
+      if (p && p.connected) idxs.push(i);
     }
+    if (idxs.length < 2) return;
+
+    const [i1, i2] = idxs;
+    const p2 = this.queue.splice(i2, 1)[0];
+    const p1 = this.queue.splice(i1, 1)[0];
+    this._startMatch(p1, p2);
   }
 
   _startMatch(playerX, playerO) {
@@ -230,6 +262,17 @@ class Tournament {
       winLine: null,
       finished: false,
     };
+  }
+
+  /** Remove e devolve o primeiro jogador conectado da fila, ou null. */
+  _takeNextConnectedFromQueue() {
+    for (let i = 0; i < this.queue.length; i++) {
+      const p = this.players.get(this.queue[i]);
+      if (p && p.connected) {
+        return this.queue.splice(i, 1)[0];
+      }
+    }
+    return null;
   }
 
   // ---------- Views ----------
